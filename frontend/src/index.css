@@ -1,0 +1,195 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Design tokens ─────────────────────────────────────────────────────────── */
+:root {
+  color-scheme: light;
+  --accent:        #3b82f6;
+  --accent-soft:   #eff6ff;
+  --surface-0:     #ffffff;
+  --surface-1:     #f8fafc;
+  --surface-2:     #f1f5f9;
+  --surface-3:     #e2e8f0;
+  --border:        #e2e8f0;
+  --text-primary:  #0f172a;
+  --text-secondary:#475569;
+  --text-muted:    #94a3b8;
+}
+
+.dark {
+  color-scheme: dark;
+  --accent:        #3b82f6;
+  --accent-soft:   rgba(59,130,246,0.12);
+  --surface-0:     #020617;
+  --surface-1:     #0f172a;
+  --surface-2:     #1e293b;
+  --surface-3:     #334155;
+  --border:        #1e293b;
+  --text-primary:  #f1f5f9;
+  --text-secondary:#94a3b8;
+  --text-muted:    #475569;
+}
+
+/* ── Base reset ────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+
+html { height: 100%; }
+
+body {
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
+  margin: 0;
+  height: 100%;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: var(--surface-0);
+  color: var(--text-primary);
+}
+
+#root { height: 100%; }
+
+/* ── Smooth theme transitions ──────────────────────────────────────────────── */
+* {
+  transition-property: background-color, border-color, color, fill, stroke;
+  transition-duration: 0.18s;
+  transition-timing-function: ease;
+}
+
+/* Opt-out elements that should NOT transition */
+button, a, input, select, textarea, canvas,
+img[data-no-transition], [data-no-transition],
+.no-transition {
+  transition-property: none;
+}
+
+button {
+  transition-property: background-color, border-color, color,
+                       box-shadow, opacity, transform;
+  transition-duration: 0.12s;
+  transition-timing-function: ease;
+}
+
+/* ── Scrollbars ────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar              { width: 4px; height: 4px; }
+::-webkit-scrollbar-track        { background: transparent; }
+::-webkit-scrollbar-thumb        { background: #4b556344; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover  { background: #6b728088; }
+
+/* ── Focus ring ────────────────────────────────────────────────────────────── */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* ── Custom animations ─────────────────────────────────────────────────────── */
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slide-in-left {
+  from { opacity: 0; transform: translateX(-12px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.3; }
+}
+
+@keyframes spin-slow {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position:  200% 0; }
+}
+
+@keyframes count-up {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in       { animation: fade-in       0.25s ease both; }
+.animate-slide-left    { animation: slide-in-left 0.22s ease both; }
+.animate-pulse-dot     { animation: pulse-dot     1.4s  ease infinite; }
+.animate-spin-slow     { animation: spin-slow     2s    linear infinite; }
+.animate-count         { animation: count-up      0.4s  ease both; }
+
+/* ── Skeleton shimmer ──────────────────────────────────────────────────────── */
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--surface-2) 25%,
+    var(--surface-3) 50%,
+    var(--surface-2) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.6s infinite;
+}
+
+/* ── Glass card ────────────────────────────────────────────────────────────── */
+.glass {
+  backdrop-filter: blur(12px) saturate(1.4);
+  -webkit-backdrop-filter: blur(12px) saturate(1.4);
+}
+
+/* ── Gradient text ─────────────────────────────────────────────────────────── */
+.gradient-text {
+  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ── Live badge pulse ──────────────────────────────────────────────────────── */
+.live-dot::before {
+  content: '';
+  display: inline-block;
+  width:  6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #ef4444;
+  margin-right: 5px;
+  animation: pulse-dot 1.2s ease infinite;
+}
+
+/* ── Step connector line ───────────────────────────────────────────────────── */
+.step-connector {
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(to right, #3b82f6, transparent);
+}
+
+/* ── Drag-drop zone ────────────────────────────────────────────────────────── */
+.drop-zone {
+  border: 2px dashed var(--border);
+  transition: border-color 0.15s, background-color 0.15s;
+}
+.drop-zone:hover,
+.drop-zone.drag-over {
+  border-color: var(--accent);
+  background-color: var(--accent-soft);
+}
+
+/* ── Progress bar fill ─────────────────────────────────────────────────────── */
+@keyframes progress-fill {
+  from { width: 0; }
+}
+.progress-fill {
+  animation: progress-fill 0.6s ease both;
+}
+
+/* ── Sidebar nav active indicator ──────────────────────────────────────────── */
+.nav-active-bar {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 60%;
+  border-radius: 0 3px 3px 0;
+  background: var(--accent);
+}
