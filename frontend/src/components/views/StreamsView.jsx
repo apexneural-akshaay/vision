@@ -6,7 +6,6 @@ function StreamCard({ stream, onClick, modelName }) {
   const { dark }          = useTheme();
   const [errored, setErr] = useState(false);
 
-  // Reset error when stream changes
   useEffect(() => { setErr(false); }, [stream.proxy_url]);
 
   return (

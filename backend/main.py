@@ -17,6 +17,7 @@ Architecture:
 """
 
 import asyncio
+import importlib.util
 import os
 import subprocess
 import threading
@@ -30,7 +31,7 @@ import cv2
 import numpy as np
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -66,10 +67,12 @@ GRABBER_RECONNECT = 3.0      # seconds between reconnect attempts
 WATCHDOG_INTERVAL = 10       # seconds between watchdog health checks
 
 # ── Runtime state ─────────────────────────────────────────────────────────────
-devices_rt:      dict[str, dict]           = {}
-camera_grabbers: dict[int, "FrameGrabber"] = {}  # keyed by camera DB id
-grabber_configs: dict[int, tuple]          = {}  # cam_id -> (channel, cfg)
-MAX_CONCURRENT_GRABBERS = 32                     # Adjust based on your DVR; most support 10-32+
+devices_rt:        dict[str, dict]               = {}
+camera_grabbers:   dict[int, "FrameGrabber"]     = {}  # keyed by camera DB id
+grabber_configs:   dict[int, tuple]              = {}  # cam_id -> (channel, cfg)
+inference_workers: dict[int, "InferenceWorker"]  = {}  # keyed by deployment DB id
+inference_configs: dict[int, tuple]              = {}  # dep_id -> (cam_id, inf_path, model_path)
+MAX_CONCURRENT_GRABBERS = 32                           # Adjust based on your DVR
 executor = ThreadPoolExecutor(max_workers=WORKER_THREADS)
 
 # ── Placeholder JPEG (sent when grabber has no frame yet) ─────────────────────
@@ -170,6 +173,72 @@ class FrameGrabber:
                 time.sleep(GRABBER_RECONNECT)
 
 
+# ── InferenceWorker ───────────────────────────────────────────────────────────
+class InferenceWorker:
+    """
+    Persistent background inference thread per deployment.
+
+    • Reads frames from the shared FrameGrabber (looked up dynamically so grabber
+      restarts are transparent — no stale reference).
+    • Runs the model and caches the latest annotated JPEG.
+    • Runs 24/7 — independent of browser connections.
+    • stop() signals the thread to exit cleanly via an Event (no sleep hang).
+    """
+
+    def __init__(self, deployment_id: int, cam_id: int, inference_module):
+        self.deployment_id    = deployment_id
+        self.cam_id           = cam_id
+        self.inference_module = inference_module
+        self._frame: Optional[bytes] = None
+        self._lock   = threading.Lock()
+        self._stop   = threading.Event()
+        self._thread = threading.Thread(
+            target=self._loop, daemon=True,
+            name=f"inference-dep{deployment_id}",
+        )
+
+    def start(self) -> "InferenceWorker":
+        self._thread.start()
+        return self
+
+    def stop(self):
+        self._stop.set()
+
+    def get_frame(self) -> Optional[bytes]:
+        with self._lock:
+            return self._frame
+
+    def _loop(self):
+        last_raw: Optional[bytes] = None
+        while not self._stop.is_set():
+            # Dynamic grabber lookup — transparent to watchdog restarts
+            grabber = camera_grabbers.get(self.cam_id)
+            if not grabber:
+                self._stop.wait(0.1)
+                continue
+
+            frame_bytes = grabber.get_frame()
+            if not frame_bytes or frame_bytes is last_raw:
+                # No new frame yet — tiny yield to avoid busy-spin
+                self._stop.wait(0.005)
+                continue
+
+            last_raw = frame_bytes
+            try:
+                frame = cv2.imdecode(
+                    np.frombuffer(frame_bytes, np.uint8), cv2.IMREAD_COLOR
+                )
+                if frame is not None and hasattr(self.inference_module, "run"):
+                    frame = self.inference_module.run(frame)
+                    _, buf = cv2.imencode(
+                        ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, MJPEG_QUALITY]
+                    )
+                    with self._lock:
+                        self._frame = buf.tobytes()
+            except Exception as exc:
+                print(f"[inference dep-{self.deployment_id}] {exc}")
+
+
 # ── Grabber management ────────────────────────────────────────────────────────
 def _start_camera_grabber(cam_id: int, channel: int, cfg: dict) -> FrameGrabber:
     """Return existing live grabber or start a new one. Keeps grabbers running."""
@@ -196,16 +265,69 @@ def _stop_device_grabbers(device_id: str):
         grabber_configs.pop(cid, None)
 
 
+def _load_inference_module(inference_path: str, model_path: str):
+    """Load and initialise an inference script. Safe to call from any thread."""
+    spec = importlib.util.spec_from_file_location("inference_module", inference_path)
+    mod  = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    if hasattr(mod, "set_model_path"):
+        mod.set_model_path(model_path)
+    return mod
+
+
+def _start_inference_worker(
+    dep_id: int, cam_id: int, inference_path: str, model_path: str
+) -> Optional["InferenceWorker"]:
+    """Return existing live worker or start a new one. Idempotent."""
+    existing = inference_workers.get(dep_id)
+    if existing and existing._thread.is_alive():
+        return existing
+
+    if not os.path.exists(model_path):
+        print(f"[inference dep-{dep_id}] Model file missing: {model_path}")
+        return None
+    if not os.path.exists(inference_path):
+        print(f"[inference dep-{dep_id}] Inference script missing: {inference_path}")
+        return None
+
+    try:
+        mod    = _load_inference_module(inference_path, model_path)
+        worker = InferenceWorker(dep_id, cam_id, mod).start()
+        inference_workers[dep_id] = worker
+        inference_configs[dep_id] = (cam_id, inference_path, model_path)
+        print(f"[inference dep-{dep_id}] Worker started for camera {cam_id}")
+        return worker
+    except Exception as exc:
+        print(f"[inference dep-{dep_id}] Failed to start: {exc}")
+        return None
+
+
+def _stop_inference_worker(dep_id: int):
+    """Stop and remove the inference worker for a deployment."""
+    worker = inference_workers.pop(dep_id, None)
+    if worker:
+        worker.stop()
+    inference_configs.pop(dep_id, None)
+
+
 def _grabber_watchdog():
-    """Background thread: restart any dead grabber every WATCHDOG_INTERVAL s."""
+    """Background thread: restart any dead grabber or inference worker every WATCHDOG_INTERVAL s."""
     while True:
         time.sleep(WATCHDOG_INTERVAL)
+
+        # Restart dead camera grabbers
         for cam_id in list(grabber_configs.keys()):
             grabber = camera_grabbers.get(cam_id)
             if grabber is None or not grabber._thread.is_alive():
                 channel, cfg = grabber_configs[cam_id]
-                new_grabber = FrameGrabber(channel, cfg).start()
-                camera_grabbers[cam_id] = new_grabber
+                camera_grabbers[cam_id] = FrameGrabber(channel, cfg).start()
+
+        # Restart dead inference workers
+        for dep_id in list(inference_configs.keys()):
+            worker = inference_workers.get(dep_id)
+            if worker is None or not worker._thread.is_alive():
+                cam_id, inf_path, model_path = inference_configs[dep_id]
+                _start_inference_worker(dep_id, cam_id, inf_path, model_path)
 
 
 # ── RTSP URL builder ──────────────────────────────────────────────────────────
@@ -246,16 +368,28 @@ async def lifespan(app: FastAPI):
             if cam.device and cam.device.device_id in devices_rt:
                 cfg = devices_rt[cam.device.device_id]
                 _start_camera_grabber(cam.id, cam.channel, cfg)
+
+        # Start background inference workers for all active deployments
+        for dep in db.query(DBDeployment).filter(DBDeployment.status == "active").all():
+            if dep.model:
+                _start_inference_worker(
+                    dep.id,
+                    dep.camera_id,
+                    dep.model.inference_path,
+                    dep.model.file_path,
+                )
     finally:
         db.close()
 
-    # Watchdog restarts any crashed grabbers every 5 seconds
+    # Watchdog restarts any crashed grabbers or inference workers
     threading.Thread(
         target=_grabber_watchdog, daemon=True, name="grabber-watchdog"
     ).start()
 
     yield
 
+    for w in list(inference_workers.values()):
+        w.stop()
     for g in list(camera_grabbers.values()):
         g.stop()
 
@@ -444,6 +578,43 @@ async def stream_camera(camera_id: int):
         )
     except Exception as e:
         raise HTTPException(500, f"Stream error for camera {channel}: {str(e)}")
+
+
+# ── Single-frame snapshots (used by grid view — avoids HTTP/1.1 connection limit) ──
+
+@app.get("/snapshot/{camera_id}")
+async def snapshot_camera(camera_id: int):
+    """
+    Return one JPEG from the persistent grabber.
+    The frontend grid polls this instead of holding a persistent MJPEG connection,
+    which would hit the browser's 6-connection-per-origin limit with 12+ cameras.
+    """
+    grabber = camera_grabbers.get(camera_id)
+    frame   = (grabber.get_frame() if grabber else None) or PLACEHOLDER_FRAME
+    return Response(content=frame, media_type="image/jpeg")
+
+
+@app.get("/snapshot_inference/{deployment_id}")
+async def snapshot_inference(deployment_id: int):
+    """
+    Single JPEG with inference annotations from the background InferenceWorker.
+    Falls back to the raw camera frame if the worker has no output yet.
+    """
+    worker = inference_workers.get(deployment_id)
+    if worker:
+        frame = worker.get_frame()
+        if frame:
+            return Response(content=frame, media_type="image/jpeg")
+    # Fallback: raw camera snapshot
+    db = SessionLocal()
+    try:
+        dep = db.query(DBDeployment).filter(DBDeployment.id == deployment_id).first()
+        cam_id = dep.camera_id if dep else None
+    finally:
+        db.close()
+    grabber = camera_grabbers.get(cam_id) if cam_id else None
+    frame   = (grabber.get_frame() if grabber else None) or PLACEHOLDER_FRAME
+    return Response(content=frame, media_type="image/jpeg")
 
 
 # ── Devices ───────────────────────────────────────────────────────────────────
@@ -658,89 +829,54 @@ async def stream_channel_legacy(device_id: str, channel: int):
     )
 
 
-# ── Inference streaming (deployment with model output) ────────────────────────
+# ── Inference streaming (reads from always-on InferenceWorker) ────────────────
 @app.get("/stream_inference/{deployment_id}")
 async def stream_with_inference(deployment_id: int):
-    """Stream with real-time inference (bounding boxes, labels, etc)"""
+    """
+    MJPEG stream with inference annotations.
+    The InferenceWorker runs 24/7 in the background — this endpoint simply
+    attaches a viewer to its cached output (like /stream/{id} for raw streams).
+    Falls back to the raw camera MJPEG if the worker has no frame yet.
+    """
     db = SessionLocal()
     try:
-        # Get deployment with all linked data
         dep = db.query(DBDeployment).filter(DBDeployment.id == deployment_id).first()
         if not dep:
             raise HTTPException(404, "Deployment not found")
-
-        cam = db.query(DBCamera).filter(DBCamera.id == dep.camera_id).first()
-        if not cam:
-            raise HTTPException(404, "Camera not found")
-
-        model = db.query(DBModel).filter(DBModel.id == dep.model_id).first()
-        if not model:
-            raise HTTPException(404, "Model not found")
-
-        if not cam.device or cam.device.device_id not in devices_rt:
-            raise HTTPException(503, "Device not available")
-
-        # Ensure model files exist
-        if not os.path.exists(model.file_path):
-            raise HTTPException(500, f"Model file not found: {model.file_path}")
-        if not os.path.exists(model.inference_path):
-            raise HTTPException(500, f"Inference script not found: {model.inference_path}")
-
-        cfg = devices_rt[cam.device.device_id]
-        cam_id = cam.id
-        channel = cam.channel
-        model_file = model.file_path
-        inference_file = model.inference_path
+        cam_id = dep.camera_id
+        # Ensure worker is running (idempotent — safe to call if already running)
+        if dep.model and deployment_id not in inference_workers:
+            _start_inference_worker(
+                dep.id,
+                dep.camera_id,
+                dep.model.inference_path,
+                dep.model.file_path,
+            )
     finally:
         db.close()
 
-    # Start grabber for this camera
-    grabber = _start_camera_grabber(cam_id, channel, cfg)
-
-    # Load inference module
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("inference_module", inference_file)
-    inference_module = importlib.util.module_from_spec(spec)
-    try:
-        spec.loader.exec_module(inference_module)
-        # Set model path if function exists
-        if hasattr(inference_module, 'set_model_path'):
-            inference_module.set_model_path(model_file)
-    except Exception as e:
-        raise HTTPException(500, f"Failed to load inference: {str(e)}")
-
-    async def _mjpeg_with_inference():
-        interval = 1.0 / STREAM_FPS_CAP
+    async def _stream():
+        last_sent: Optional[bytes] = None
         while True:
-            frame_bytes = grabber.get_frame()
-            if not frame_bytes:
-                frame_bytes = PLACEHOLDER_FRAME
-            else:
-                # Decode JPEG
-                try:
-                    frame = cv2.imdecode(np.frombuffer(frame_bytes, np.uint8), cv2.IMREAD_COLOR)
-                    if frame is not None and hasattr(inference_module, 'run'):
-                        # Run inference on frame
-                        frame = inference_module.run(frame)
-                        # Re-encode to JPEG
-                        _, frame_bytes = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, MJPEG_QUALITY])
-                        frame_bytes = frame_bytes.tobytes()
-                except Exception as e:
-                    print(f"Inference error: {e}")
-                    # Fall back to original frame on inference error
-
-            yield (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n\r\n"
-                + frame_bytes
-                + b"\r\n"
+            # Dynamic lookup every tick — transparent to watchdog restarts
+            w = inference_workers.get(deployment_id)
+            g = camera_grabbers.get(cam_id)
+            frame_bytes = (
+                (w.get_frame() if w else None)
+                or (g.get_frame() if g else None)
+                or PLACEHOLDER_FRAME
             )
-            await asyncio.sleep(interval)
+            if frame_bytes is not last_sent:
+                last_sent = frame_bytes
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n"
+                    + frame_bytes
+                    + b"\r\n"
+                )
+            await asyncio.sleep(0.001)
 
-    return StreamingResponse(
-        _mjpeg_with_inference(),
-        media_type="multipart/x-mixed-replace; boundary=frame",
-    )
+    return StreamingResponse(_stream(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 
 # ── Models ────────────────────────────────────────────────────────────────────
@@ -896,6 +1032,14 @@ async def create_deployment(dep: DeploymentCreate, db: Session = Depends(get_db)
         db.rollback()
         raise HTTPException(500, f"Deployment failed: {str(e)}")
 
+    # Start background inference worker immediately (runs until deployment is deleted)
+    _start_inference_worker(
+        db_dep.id,
+        db_dep.camera_id,
+        model.inference_path,
+        model.file_path,
+    )
+
     return {
         "id":        db_dep.id,
         "camera_id": db_dep.camera_id,
@@ -910,6 +1054,7 @@ async def delete_deployment(dep_id: int, db: Session = Depends(get_db)):
     dep = db.query(DBDeployment).filter(DBDeployment.id == dep_id).first()
     if not dep:
         raise HTTPException(404, "Deployment not found")
+    _stop_inference_worker(dep_id)   # stop background inference before removing from DB
     db.delete(dep)
     db.commit()
     return {"status": "removed"}
