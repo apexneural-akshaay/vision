@@ -33,6 +33,12 @@ const Icons = {
         d="M9 3H5a2 2 0 00-2 2v14a2 2 0 002 2h4m6-18h4a2 2 0 012 2v14a2 2 0 01-2 2h-4M9 3v18M9 12h6" />
     </svg>
   ),
+  events: () => (
+    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+      <path strokeLinecap="round" strokeLinejoin="round"
+        d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+    </svg>
+  ),
   dvr: () => (
     <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
       <rect x="2" y="7" width="20" height="10" rx="2" strokeLinecap="round" strokeLinejoin="round" />
@@ -182,6 +188,7 @@ const NAV = [
   { id: "streams",  label: "Streams",     icon: Icons.streams  },
   { id: "models",   label: "ML Models",   icon: Icons.models   },
   { id: "deploy",   label: "Deploy",      icon: Icons.deploy   },
+  { id: "events",   label: "Events",      icon: Icons.events   },
   { id: "devices",  label: "Devices",     icon: Icons.devices  },
 ];
 

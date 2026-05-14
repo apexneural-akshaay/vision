@@ -4,9 +4,10 @@ vision.db is auto-created in the same directory as this file.
 """
 
 import os
-from sqlalchemy import create_engine, Column, Integer, String, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from sqlalchemy.pool import NullPool
+from datetime import datetime
 
 BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
 DB_PATH      = os.path.join(BASE_DIR, "vision.db")
@@ -88,6 +89,21 @@ class Deployment(Base):
 
     camera = relationship("Camera", back_populates="deployments")
     model  = relationship("MLModel", back_populates="deployments")
+
+
+class Event(Base):
+    __tablename__ = "events"
+
+    id              = Column(Integer, primary_key=True, index=True)
+    deployment_id   = Column(Integer, index=True, nullable=True)
+    camera_id       = Column(Integer, index=True, nullable=True)
+    camera_name     = Column(String, default="")
+    device_name     = Column(String, default="")
+    channel         = Column(Integer, default=0)
+    event_type      = Column(String, nullable=False)     # e.g. "person_detected"
+    screenshot_path = Column(String, default="")         # relative filename only
+    details         = Column(String, default="")         # free-form / JSON string
+    timestamp       = Column(DateTime, default=datetime.utcnow, index=True)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

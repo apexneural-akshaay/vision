@@ -4,6 +4,7 @@ import Overview    from "./components/views/Overview.jsx";
 import StreamsView from "./components/views/StreamsView.jsx";
 import MLModels    from "./components/views/MLModels.jsx";
 import Deploy      from "./components/views/Deploy.jsx";
+import Events      from "./components/views/Events.jsx";
 import Devices     from "./components/views/Devices.jsx";
 
 // ── Theme context ─────────────────────────────────────────────────────────────
@@ -32,6 +33,7 @@ function Header({ view, selectedDevice }) {
     streams: "Live Streams",
     models: "ML Models",
     deploy: "Deploy",
+    events: "Events",
     devices: "Devices",
   };
 
@@ -221,6 +223,10 @@ export default function App() {
                     onDeployed={handleDepAdded}
                     onRemoved={handleDepDeleted}
                   />
+                )}
+
+                {view === "events" && (
+                  <Events />
                 )}
 
                 {view === "devices" && (
